@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Revolut → EUR</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- SheetJS: lee csv/xlsx/ods y escribe xlsx en el navegador -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Revolut → EUR</h1>
+      <p class="sub">Convierte compras y ventas a euros con el tipo oficial del BCE de cada fecha.
+        Todo ocurre en tu navegador: tu archivo no se sube a ningún servidor.</p>
+    </header>
+
+    <section class="card">
+      <p class="kicker">PASOS</p>
+
+      <label id="dropzone" class="dropzone" for="file">
+        <input type="file" id="file" accept=".csv,.xlsx,.ods" hidden />
+        <span class="dz-icon">↥</span>
+        <span id="dz-text" class="dz-text">Arrastra aquí tu archivo de Revolut<br>
+          <small>o haz clic para elegirlo · .csv · .xlsx · .ods</small></span>
+      </label>
+
+      <button id="convert" class="btn" disabled>Convertir y descargar</button>
+
+      <div id="bar" class="bar" hidden><div class="bar-fill"></div></div>
+      <p id="status" class="status">Selecciona un archivo para empezar.</p>
+    </section>
+
+    <footer>Tipos oficiales del Banco Central Europeo (API SDMX) · regla de día hábil anterior</footer>
+  </main>
+</body>
+</html>
