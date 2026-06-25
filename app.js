@@ -2,12 +2,12 @@
 /* Revolut → EUR — app estática. Lee el informe de Revolut, obtiene los tipos del BCE
    (API SDMX, con CORS) y descarga el mismo archivo en euros. Sin servidor. */
 
-const MARCA_VENTAS = "income from sells";
 const MARCA_OTROS = "other income & fees";
 const SDMX = "https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A" +
   "?startPeriod={ini}&endPeriod={fin}&format=csvdata";
-const REQUERIDAS = ["date acquired", "date sold", "symbol", "security name", "isin",
-  "country", "quantity", "cost basis", "gross proceeds", "gross pnl", "currency"];
+// Columnas mínimas para detectar la fila de cabeceras y poder convertir. El resto de columnas
+// (symbol, security name, isin, country, quantity, fees, net pnl…) se conservan tal cual si están.
+const REQUERIDAS = ["date acquired", "date sold", "cost basis", "gross proceeds", "currency"];
 const COLS_EXTRA = ["FX compra (USD/EUR)", "FX venta (USD/EUR)"];
 const MAX_DIAS_ATRAS = 10, MARGEN_INICIO = 15;
 
@@ -39,6 +39,7 @@ function fmtISO(d) {
 }
 function isoDe(v) {
   if (v instanceof Date) {                          // xlsx/ods (cellDates): usa la fecha "de pared", sin desfase horario
+    if (Number.isNaN(v.getTime())) throw new Error("El archivo contiene una celda de fecha que no se pudo interpretar.");
     return fmtISO(new Date(Date.UTC(v.getFullYear(), v.getMonth(), v.getDate())));
   }
   if (typeof v === "number") {                      // serie de Excel/SheetJS: días desde 1899-12-30
@@ -80,17 +81,26 @@ const norm = (s) => String(s).trim().toLowerCase();
 const vacia = (fila) => fila.every((c) => String(c).trim() === "");
 
 function parsearInforme(filas) {
-  const idxVentas = filas.findIndex((f) => f.length && norm(f[0]) === MARCA_VENTAS);
-  if (idxVentas < 0) throw new Error("No se encontró el bloque 'Income from Sells' en el archivo.");
+  // Localiza la fila de cabeceras por sus columnas, sin depender del título "Income from Sells".
+  const idxCab = filas.findIndex((f) => {
+    const cols = new Set(f.map(norm));
+    return REQUERIDAS.every((c) => cols.has(c));
+  });
+  if (idxCab < 0) {
+    throw new Error("No se encontró la fila de cabeceras con las columnas requeridas: " + REQUERIDAS.join(", ") + ".");
+  }
 
-  const cabeceras = filas[idxVentas + 1].map((c) => String(c).trim());
+  const cabeceras = filas[idxCab].map((c) => String(c).trim());
   const col = {};
   cabeceras.forEach((h, i) => (col[norm(h)] = i));
-  const faltan = REQUERIDAS.filter((c) => !(c in col));
-  if (faltan.length) throw new Error("Faltan columnas en 'Income from Sells': " + faltan.join(", "));
+
+  // Título opcional encima de las cabeceras (p. ej. "Income from Sells"); si no hay, queda null.
+  const previa = idxCab > 0 ? filas[idxCab - 1] : null;
+  const titulo = previa && String(previa[0] || "").trim() &&
+    previa.slice(1).every((c) => String(c).trim() === "") ? String(previa[0]).trim() : null;
 
   const operaciones = [];
-  for (let k = idxVentas + 2; k < filas.length; k++) {
+  for (let k = idxCab + 1; k < filas.length; k++) {
     const fila = filas[k];
     if (vacia(fila) || norm(fila[0]) === MARCA_OTROS) break;
     operaciones.push(filaAOperacion(fila, col));
@@ -107,18 +117,17 @@ function parsearInforme(filas) {
     }
     bloques.push({ titulo: String(filas[idxOtros][0]).trim(), cabeceras: cab, filas: datos });
   }
-  return { operaciones, cabeceras, bloques };
+  return { operaciones, cabeceras, titulo, bloques };
 }
 
 function filaAOperacion(fila, col) {
   const v = (n) => fila[col[n]];
-  const divisa = String(v("currency") || "USD").toUpperCase();
   return {
+    fila, col,                                       // se conserva la fila original para volcar las demás columnas
     fc: isoDe(v("date acquired")), fv: isoDe(v("date sold")),
-    symbol: v("symbol"), nombre: v("security name"), isin: v("isin"), pais: v("country"),
-    cantidad: aDecimal(v("quantity")),
     coste: aDecimal(v("cost basis")), ingreso: aDecimal(v("gross proceeds")),
-    divisa,
+    fees: "fees" in col ? aDecimal(v("fees")) : null,
+    divisa: String(v("currency") || "USD").toUpperCase(),
   };
 }
 
@@ -160,14 +169,20 @@ function usdPorEur(mapa, iso) {
 function convertir(op, mapa) {
   if (op.divisa === "EUR") {                       // ya en euros: no se toca
     op.costeEur = round2(op.coste); op.ingresoEur = round2(op.ingreso);
-    op.pnlEur = round2(op.ingreso - op.coste); op.fxC = op.fxV = "";
+    op.feesEur = op.fees == null ? null : round2(op.fees);
+    op.pnlEur = round2(op.ingreso - op.coste);
+    op.netEur = op.fees == null ? null : round2(op.ingreso - op.coste - op.fees);
+    op.fxC = op.fxV = "";
     return;
   }
   const fxC = usdPorEur(mapa, op.fc), fxV = usdPorEur(mapa, op.fv);
   const costeU = op.coste / fxC, ingresoU = op.ingreso / fxV;
+  const feesU = op.fees == null ? null : op.fees / fxV;   // comisiones al tipo del día de la venta
   op.fxC = fxC; op.fxV = fxV;
   op.costeEur = round2(costeU); op.ingresoEur = round2(ingresoU);
-  op.pnlEur = round2(ingresoU - costeU);           // PnL con importes SIN redondear
+  op.feesEur = feesU == null ? null : round2(feesU);
+  op.pnlEur = round2(ingresoU - costeU);                  // PnL e importes con divisas SIN redondear
+  op.netEur = feesU == null ? null : round2(ingresoU - costeU - feesU);
 }
 
 /* ------------------------- generar el xlsx ---------------------------- */
@@ -176,7 +191,7 @@ function construirAoA(informe) {
   const ancho = cab.length + COLS_EXTRA.length;
   const aoa = [];
 
-  aoa.push(["Income from Sells"]);
+  if (informe.titulo) aoa.push([informe.titulo]);
   aoa.push([...cab, ...COLS_EXTRA]);
   for (const op of informe.operaciones) aoa.push(filaOperacion(op, cab));
 
@@ -197,13 +212,20 @@ function construirAoA(informe) {
 }
 
 function filaOperacion(op, cab) {
-  const base = {
-    "date acquired": op.fc, "date sold": op.fv, "symbol": op.symbol,
-    "security name": op.nombre, "isin": op.isin, "country": op.pais,
-    "quantity": op.cantidad, "cost basis": op.costeEur, "gross proceeds": op.ingresoEur,
-    "gross pnl": op.pnlEur, "currency": "EUR",
-  };
-  const fila = cab.map((h) => (norm(h) in base ? base[norm(h)] : ""));
+  // Convierte las columnas monetarias y de fecha; las demás se copian de la fila original.
+  const fila = cab.map((h, i) => {
+    switch (norm(h)) {
+      case "date acquired": return op.fc;
+      case "date sold": return op.fv;
+      case "cost basis": return op.costeEur;
+      case "gross proceeds": return op.ingresoEur;
+      case "gross pnl": return op.pnlEur;
+      case "fees": return op.feesEur;
+      case "net pnl": return op.netEur;
+      case "currency": return "EUR";
+      default: return op.fila[i] ?? "";
+    }
+  });
   fila.push(op.fxC, op.fxV);
   return fila;
 }
