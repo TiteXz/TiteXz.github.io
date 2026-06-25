@@ -38,10 +38,23 @@ function fmtISO(d) {
   return `${y}-${m}-${day}`;
 }
 function isoDe(v) {
-  if (v instanceof Date) return fmtISO(v);
+  if (v instanceof Date) {                          // xlsx/ods (cellDates): usa la fecha "de pared", sin desfase horario
+    return fmtISO(new Date(Date.UTC(v.getFullYear(), v.getMonth(), v.getDate())));
+  }
+  if (typeof v === "number") {                      // serie de Excel/SheetJS: días desde 1899-12-30
+    return fmtISO(new Date(Math.round((v - 25569) * 86400000)));
+  }
   const s = String(v).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  return fmtISO(new Date(s));
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);          // ISO aaaa-mm-dd
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);  // dd/mm/aaaa (formato europeo)
+  if (m) {
+    const d = m[1].padStart(2, "0"), mo = m[2].padStart(2, "0");
+    const y = m[3].length === 2 ? "20" + m[3] : m[3];
+    return `${y}-${mo}-${d}`;
+  }
+  const dt = new Date(s);
+  if (Number.isNaN(dt.getTime())) throw new Error(`Fecha no reconocida en el archivo: "${s}".`);
+  return fmtISO(dt);
 }
 function sumarDias(iso, n) {
   const d = new Date(iso + "T00:00:00Z");
@@ -113,7 +126,12 @@ function filaAOperacion(fila, col) {
 async function cargarTipos(iniISO, finISO, status) {
   const url = SDMX.replace("{ini}", sumarDias(iniISO, -MARGEN_INICIO)).replace("{fin}", finISO);
   status("Obteniendo tipos del BCE…");
-  const resp = await fetch(url);
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch {
+    throw new Error("No se pudo conectar con el BCE. Revisa tu conexión; si usas un bloqueador (uBlock, Brave, etc.) desactívalo para esta página.");
+  }
   if (!resp.ok) throw new Error("No se pudieron obtener los tipos del BCE (HTTP " + resp.status + ").");
   const text = await resp.text();
   const lineas = text.split(/\r?\n/);
